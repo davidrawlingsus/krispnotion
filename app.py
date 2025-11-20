@@ -103,8 +103,10 @@ def parse_tasks_from_payload(payload):
             payload.get('data') or
             str(payload)
         )
+        print(f"Payload is dict, extracted text_content length: {len(str(text_content))}")
     else:
         text_content = str(payload)
+        print(f"Payload is not dict, text_content length: {len(text_content)}")
     
     # Pattern to match "Task: ... Owner: ..." entries
     # This handles multi-line tasks and various formats
@@ -112,14 +114,20 @@ def parse_tasks_from_payload(payload):
     pattern = r'Task:\s*(.+?)\s+Owner:\s*(\w+)'
     
     matches = re.finditer(pattern, text_content, re.DOTALL | re.IGNORECASE)
+    match_count = 0
     
     for match in matches:
+        match_count += 1
         task_text = match.group(1).strip()
         owner = match.group(2).strip()
+        print(f"Found task {match_count}: owner={owner}, task_length={len(task_text)}")
         tasks.append({
             'task': task_text,
             'owner': owner
         })
+    
+    if match_count == 0:
+        print(f"No tasks matched pattern. First 500 chars of text_content: {text_content[:500]}")
     
     return tasks
 
@@ -302,9 +310,11 @@ def webhook():
         
         # Parse tasks from payload
         tasks = parse_tasks_from_payload(payload)
+        print(f"Parsed {len(tasks)} task(s) from payload")
         
         if not tasks:
             print("No tasks found in payload")
+            print(f"Payload content: {json.dumps(payload, indent=2)[:500]}")  # Print first 500 chars for debugging
             return jsonify({
                 "status": "success",
                 "message": "Payload received and saved, but no tasks found",
@@ -315,40 +325,52 @@ def webhook():
         
         # Process and forward each task to Zapier
         results = []
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                for task_data in tasks:
-                    # Clean the task text
-                    cleaned_task = clean_task_text(task_data['task'], task_data['owner'])
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    for idx, task_data in enumerate(tasks, 1):
+                        # Clean the task text
+                        cleaned_task = clean_task_text(task_data['task'], task_data['owner'])
+                        
+                        # Prepare data for Zapier
+                        zapier_data = {
+                            'task': cleaned_task,
+                            'owner': task_data['owner']
+                        }
+                        
+                        # Post to Zapier
+                        success, response_text = post_to_zapier(zapier_data)
+                        
+                        # Save to database
+                        try:
+                            cursor.execute("""
+                                INSERT INTO sent_tasks (payload_id, task, owner, zapier_response, success)
+                                VALUES (%s, %s, %s, %s, %s)
+                            """, (payload_id, cleaned_task, task_data['owner'], response_text, success))
+                            print(f"Task {idx}/{len(tasks)} saved to database: {cleaned_task[:50]}... (Owner: {task_data['owner']})")
+                        except Exception as db_error:
+                            print(f"ERROR saving task {idx} to database: {str(db_error)}")
+                            print(f"Task data: task={cleaned_task[:100]}, owner={task_data['owner']}, payload_id={payload_id}")
+                            # Continue processing other tasks even if one fails
+                        
+                        results.append({
+                            'task': cleaned_task,
+                            'owner': task_data['owner'],
+                            'success': success,
+                            'response': response_text
+                        })
+                        
+                        if success:
+                            print(f"Successfully posted task {idx} to Zapier: {cleaned_task[:50]}... (Owner: {task_data['owner']})")
+                        else:
+                            print(f"Failed to post task {idx} to Zapier: {response_text}")
                     
-                    # Prepare data for Zapier
-                    zapier_data = {
-                        'task': cleaned_task,
-                        'owner': task_data['owner']
-                    }
-                    
-                    # Post to Zapier
-                    success, response_text = post_to_zapier(zapier_data)
-                    
-                    # Save to database
-                    cursor.execute("""
-                        INSERT INTO sent_tasks (payload_id, task, owner, zapier_response, success)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (payload_id, cleaned_task, task_data['owner'], response_text, success))
-                    
-                    results.append({
-                        'task': cleaned_task,
-                        'owner': task_data['owner'],
-                        'success': success,
-                        'response': response_text
-                    })
-                    
-                    if success:
-                        print(f"Successfully posted task to Zapier: {cleaned_task[:50]}... (Owner: {task_data['owner']})")
-                    else:
-                        print(f"Failed to post task to Zapier: {response_text}")
-                
-                conn.commit()
+                    conn.commit()
+                    print(f"Committed {len(tasks)} task(s) to database")
+        except Exception as db_error:
+            print(f"ERROR in database transaction: {str(db_error)}")
+            import traceback
+            traceback.print_exc()
         
         successful_count = sum(1 for r in results if r['success'])
         
