@@ -340,24 +340,53 @@ def webhook():
         payload_id, received_at = result
         
         print(f"Received payload and saved to database with ID {payload_id}")
+        print(f"Payload structure: {type(payload).__name__}")
+        if isinstance(payload, (list, dict)):
+            print(f"Payload keys/structure preview: {json.dumps(payload, indent=2)[:1000]}")
         
         # Extract meeting_name and meeting_date from payload
         meeting_name = None
         meeting_date = None
         
-        # Handle list format (e.g., [{'krisp_blob': '...', 'meeting_name': '...', 'meeting_date': '...'}])
-        if isinstance(payload, list) and len(payload) > 0 and isinstance(payload[0], dict):
-            meeting_name = payload[0].get('meeting_name')
-            meeting_date = payload[0].get('meeting_date')
+        # Handle list format - check all items in the list
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    # Check if this item has meeting_name or meeting_date
+                    if 'meeting_name' in item and meeting_name is None:
+                        meeting_name = item.get('meeting_name')
+                    if 'meeting_date' in item and meeting_date is None:
+                        meeting_date = item.get('meeting_date')
+                    # Also check nested structures
+                    if meeting_name is None or meeting_date is None:
+                        # Check if there are nested objects
+                        for key, value in item.items():
+                            if isinstance(value, dict):
+                                if 'meeting_name' in value and meeting_name is None:
+                                    meeting_name = value.get('meeting_name')
+                                if 'meeting_date' in value and meeting_date is None:
+                                    meeting_date = value.get('meeting_date')
         # Handle dict format
         elif isinstance(payload, dict):
             meeting_name = payload.get('meeting_name')
             meeting_date = payload.get('meeting_date')
+            # Also check nested structures
+            if meeting_name is None or meeting_date is None:
+                for key, value in payload.items():
+                    if isinstance(value, dict):
+                        if 'meeting_name' in value and meeting_name is None:
+                            meeting_name = value.get('meeting_name')
+                        if 'meeting_date' in value and meeting_date is None:
+                            meeting_date = value.get('meeting_date')
         
         if meeting_name:
             print(f"Extracted meeting_name: {meeting_name}")
+        else:
+            print("WARNING: meeting_name not found in payload")
         if meeting_date:
             print(f"Extracted meeting_date: {meeting_date}")
+        else:
+            print("WARNING: meeting_date not found in payload")
         
         # Parse tasks from payload
         tasks = parse_tasks_from_payload(payload)
