@@ -341,6 +341,24 @@ def webhook():
         
         print(f"Received payload and saved to database with ID {payload_id}")
         
+        # Extract meeting_name and meeting_date from payload
+        meeting_name = None
+        meeting_date = None
+        
+        # Handle list format (e.g., [{'krisp_blob': '...', 'meeting_name': '...', 'meeting_date': '...'}])
+        if isinstance(payload, list) and len(payload) > 0 and isinstance(payload[0], dict):
+            meeting_name = payload[0].get('meeting_name')
+            meeting_date = payload[0].get('meeting_date')
+        # Handle dict format
+        elif isinstance(payload, dict):
+            meeting_name = payload.get('meeting_name')
+            meeting_date = payload.get('meeting_date')
+        
+        if meeting_name:
+            print(f"Extracted meeting_name: {meeting_name}")
+        if meeting_date:
+            print(f"Extracted meeting_date: {meeting_date}")
+        
         # Parse tasks from payload
         tasks = parse_tasks_from_payload(payload)
         print(f"Parsed {len(tasks)} task(s) from payload")
@@ -370,6 +388,12 @@ def webhook():
                             'task': cleaned_task,
                             'owner': task_data['owner']
                         }
+                        
+                        # Add meeting_name and meeting_date if available
+                        if meeting_name:
+                            zapier_data['meeting_name'] = meeting_name
+                        if meeting_date:
+                            zapier_data['meeting_date'] = meeting_date
                         
                         # Post to Zapier
                         success, response_text = post_to_zapier(zapier_data)
