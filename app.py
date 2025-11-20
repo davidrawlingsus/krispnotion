@@ -161,6 +161,7 @@ def parse_tasks_from_payload(payload):
 def clean_task_text(task_text, owner):
     """
     Remove owner prefixes like "Anthony to...", "David to..." from task text.
+    Capitalizes the first letter of the task.
     """
     # Pattern to match "Owner to" or "Owner:" at the start
     patterns = [
@@ -173,7 +174,13 @@ def clean_task_text(task_text, owner):
     for pattern in patterns:
         cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
     
-    return cleaned.strip()
+    cleaned = cleaned.strip()
+    
+    # Capitalize the first letter
+    if cleaned:
+        cleaned = cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
+    
+    return cleaned
 
 
 def post_to_zapier(task_data):
