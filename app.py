@@ -22,11 +22,11 @@ def get_db_connection():
 
 
 def init_db():
-    """Initialize database table if it doesn't exist"""
+    """Initialize database tables if they don't exist"""
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                # Create table if it doesn't exist
+                # Create payloads table if it doesn't exist
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS payloads (
                         id SERIAL PRIMARY KEY,
@@ -39,6 +39,30 @@ def init_db():
                 cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_payloads_received_at 
                     ON payloads(received_at DESC)
+                """)
+                
+                # Create sent_tasks table to track tasks sent to Zapier
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS sent_tasks (
+                        id SERIAL PRIMARY KEY,
+                        payload_id INTEGER REFERENCES payloads(id),
+                        task TEXT NOT NULL,
+                        owner VARCHAR(255) NOT NULL,
+                        sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        zapier_response TEXT,
+                        success BOOLEAN NOT NULL
+                    )
+                """)
+                
+                # Create indexes for sent_tasks
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_sent_tasks_sent_at 
+                    ON sent_tasks(sent_at DESC)
+                """)
+                
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_sent_tasks_payload_id 
+                    ON sent_tasks(payload_id)
                 """)
                 
                 conn.commit()
@@ -291,30 +315,40 @@ def webhook():
         
         # Process and forward each task to Zapier
         results = []
-        for task_data in tasks:
-            # Clean the task text
-            cleaned_task = clean_task_text(task_data['task'], task_data['owner'])
-            
-            # Prepare data for Zapier
-            zapier_data = {
-                'task': cleaned_task,
-                'owner': task_data['owner']
-            }
-            
-            # Post to Zapier
-            success, response_text = post_to_zapier(zapier_data)
-            
-            results.append({
-                'task': cleaned_task,
-                'owner': task_data['owner'],
-                'success': success,
-                'response': response_text
-            })
-            
-            if success:
-                print(f"Successfully posted task to Zapier: {cleaned_task[:50]}... (Owner: {task_data['owner']})")
-            else:
-                print(f"Failed to post task to Zapier: {response_text}")
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                for task_data in tasks:
+                    # Clean the task text
+                    cleaned_task = clean_task_text(task_data['task'], task_data['owner'])
+                    
+                    # Prepare data for Zapier
+                    zapier_data = {
+                        'task': cleaned_task,
+                        'owner': task_data['owner']
+                    }
+                    
+                    # Post to Zapier
+                    success, response_text = post_to_zapier(zapier_data)
+                    
+                    # Save to database
+                    cursor.execute("""
+                        INSERT INTO sent_tasks (payload_id, task, owner, zapier_response, success)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (payload_id, cleaned_task, task_data['owner'], response_text, success))
+                    
+                    results.append({
+                        'task': cleaned_task,
+                        'owner': task_data['owner'],
+                        'success': success,
+                        'response': response_text
+                    })
+                    
+                    if success:
+                        print(f"Successfully posted task to Zapier: {cleaned_task[:50]}... (Owner: {task_data['owner']})")
+                    else:
+                        print(f"Failed to post task to Zapier: {response_text}")
+                
+                conn.commit()
         
         successful_count = sum(1 for r in results if r['success'])
         
@@ -330,6 +364,125 @@ def webhook():
         
     except Exception as e:
         print(f"Error processing webhook: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sent-tasks", methods=["GET"])
+def list_sent_tasks():
+    """List all tasks sent to Zapier"""
+    try:
+        limit = request.args.get('limit', default=50, type=int)
+        offset = request.args.get('offset', default=0, type=int)
+        
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                # Get total count
+                cursor.execute("SELECT COUNT(*) as total FROM sent_tasks")
+                total = cursor.fetchone()["total"]
+                
+                # Get tasks
+                cursor.execute("""
+                    SELECT id, payload_id, task, owner, sent_at, zapier_response, success
+                    FROM sent_tasks
+                    ORDER BY sent_at DESC
+                    LIMIT %s OFFSET %s
+                """, (limit, offset))
+                
+                results = cursor.fetchall()
+        
+        tasks = [
+            {
+                "id": row["id"],
+                "payload_id": row["payload_id"],
+                "task": row["task"],
+                "owner": row["owner"],
+                "sent_at": row["sent_at"].isoformat(),
+                "success": row["success"],
+                "zapier_response": row["zapier_response"]
+            }
+            for row in results
+        ]
+        
+        return jsonify({
+            "count": len(tasks),
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "tasks": tasks
+        }), 200
+        
+    except Exception as e:
+        print(f"Error listing sent tasks: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sent-tasks/<int:task_id>", methods=["GET"])
+def get_sent_task(task_id):
+    """Get a specific sent task by ID"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("""
+                    SELECT id, payload_id, task, owner, sent_at, zapier_response, success
+                    FROM sent_tasks
+                    WHERE id = %s
+                """, (task_id,))
+                
+                result = cursor.fetchone()
+        
+        if not result:
+            return jsonify({"error": "Task not found"}), 404
+        
+        return jsonify({
+            "id": result["id"],
+            "payload_id": result["payload_id"],
+            "task": result["task"],
+            "owner": result["owner"],
+            "sent_at": result["sent_at"].isoformat(),
+            "success": result["success"],
+            "zapier_response": result["zapier_response"]
+        }), 200
+        
+    except Exception as e:
+        print(f"Error retrieving sent task: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/payload/<int:payload_id>/tasks", methods=["GET"])
+def get_payload_tasks(payload_id):
+    """Get all tasks sent to Zapier for a specific payload"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("""
+                    SELECT id, task, owner, sent_at, zapier_response, success
+                    FROM sent_tasks
+                    WHERE payload_id = %s
+                    ORDER BY sent_at DESC
+                """, (payload_id,))
+                
+                results = cursor.fetchall()
+        
+        tasks = [
+            {
+                "id": row["id"],
+                "task": row["task"],
+                "owner": row["owner"],
+                "sent_at": row["sent_at"].isoformat(),
+                "success": row["success"],
+                "zapier_response": row["zapier_response"]
+            }
+            for row in results
+        ]
+        
+        return jsonify({
+            "payload_id": payload_id,
+            "count": len(tasks),
+            "tasks": tasks
+        }), 200
+        
+    except Exception as e:
+        print(f"Error retrieving payload tasks: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
