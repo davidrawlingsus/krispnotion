@@ -66,6 +66,30 @@ def init_db():
                     ON sent_tasks(payload_id)
                 """)
                 
+                # Add meeting_name and meeting_date columns if they don't exist
+                # Check if columns exist before adding them
+                cursor.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='sent_tasks' AND column_name='meeting_name'
+                """)
+                if not cursor.fetchone():
+                    cursor.execute("""
+                        ALTER TABLE sent_tasks 
+                        ADD COLUMN meeting_name VARCHAR(255)
+                    """)
+                
+                cursor.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='sent_tasks' AND column_name='meeting_date'
+                """)
+                if not cursor.fetchone():
+                    cursor.execute("""
+                        ALTER TABLE sent_tasks 
+                        ADD COLUMN meeting_date VARCHAR(255)
+                    """)
+                
                 conn.commit()
         print("Database initialized successfully")
     except Exception as e:
@@ -431,9 +455,9 @@ def webhook():
                         # Save to database
                         try:
                             cursor.execute("""
-                                INSERT INTO sent_tasks (payload_id, task, owner, zapier_response, success)
-                                VALUES (%s, %s, %s, %s, %s)
-                            """, (payload_id, cleaned_task, task_data['owner'], response_text, success))
+                                INSERT INTO sent_tasks (payload_id, task, owner, zapier_response, success, meeting_name, meeting_date)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """, (payload_id, cleaned_task, task_data['owner'], response_text, success, meeting_name, meeting_date))
                             print(f"Task {idx}/{len(tasks)} saved to database: {cleaned_task[:50]}... (Owner: {task_data['owner']})")
                         except Exception as db_error:
                             print(f"ERROR saving task {idx} to database: {str(db_error)}")
@@ -491,7 +515,7 @@ def list_sent_tasks():
                 
                 # Get tasks
                 cursor.execute("""
-                    SELECT id, payload_id, task, owner, sent_at, zapier_response, success
+                    SELECT id, payload_id, task, owner, sent_at, zapier_response, success, meeting_name, meeting_date
                     FROM sent_tasks
                     ORDER BY sent_at DESC
                     LIMIT %s OFFSET %s
@@ -507,7 +531,9 @@ def list_sent_tasks():
                 "owner": row["owner"],
                 "sent_at": row["sent_at"].isoformat(),
                 "success": row["success"],
-                "zapier_response": row["zapier_response"]
+                "zapier_response": row["zapier_response"],
+                "meeting_name": row.get("meeting_name"),
+                "meeting_date": row.get("meeting_date")
             }
             for row in results
         ]
@@ -532,7 +558,7 @@ def get_sent_task(task_id):
         with get_db_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute("""
-                    SELECT id, payload_id, task, owner, sent_at, zapier_response, success
+                    SELECT id, payload_id, task, owner, sent_at, zapier_response, success, meeting_name, meeting_date
                     FROM sent_tasks
                     WHERE id = %s
                 """, (task_id,))
@@ -549,7 +575,9 @@ def get_sent_task(task_id):
             "owner": result["owner"],
             "sent_at": result["sent_at"].isoformat(),
             "success": result["success"],
-            "zapier_response": result["zapier_response"]
+            "zapier_response": result["zapier_response"],
+            "meeting_name": result.get("meeting_name"),
+            "meeting_date": result.get("meeting_date")
         }), 200
         
     except Exception as e:
@@ -564,7 +592,7 @@ def get_payload_tasks(payload_id):
         with get_db_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute("""
-                    SELECT id, task, owner, sent_at, zapier_response, success
+                    SELECT id, task, owner, sent_at, zapier_response, success, meeting_name, meeting_date
                     FROM sent_tasks
                     WHERE payload_id = %s
                     ORDER BY sent_at DESC
@@ -579,7 +607,9 @@ def get_payload_tasks(payload_id):
                 "owner": row["owner"],
                 "sent_at": row["sent_at"].isoformat(),
                 "success": row["success"],
-                "zapier_response": row["zapier_response"]
+                "zapier_response": row["zapier_response"],
+                "meeting_name": row.get("meeting_name"),
+                "meeting_date": row.get("meeting_date")
             }
             for row in results
         ]
