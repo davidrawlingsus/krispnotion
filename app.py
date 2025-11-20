@@ -79,7 +79,9 @@ init_db()
 
 def parse_tasks_from_payload(payload):
     """
-    Parse tasks from payload. Handles both string and dict formats.
+    Parse tasks from payload. Handles multiple formats:
+    - Markdown task list: "- [ ] Owner to task description"
+    - Task/Owner format: "Task: ... Owner: ..."
     Returns list of dicts with 'task' and 'owner' keys.
     """
     tasks = []
@@ -92,10 +94,20 @@ def parse_tasks_from_payload(payload):
             # If not JSON, treat as plain text
             pass
     
+    # Handle list format (e.g., [{'krisp_blob': '...'}])
+    if isinstance(payload, list) and len(payload) > 0:
+        if isinstance(payload[0], dict) and 'krisp_blob' in payload[0]:
+            text_content = payload[0]['krisp_blob']
+            print(f"Found krisp_blob in list payload, length: {len(text_content)}")
+        else:
+            # Try to extract text from list items
+            text_content = '\n'.join(str(item) for item in payload)
+            print(f"Payload is list, converted to text, length: {len(text_content)}")
     # If payload is a dict, look for common keys that might contain the task text
-    if isinstance(payload, dict):
-        # Check for common keys like 'text', 'content', 'body', 'message', 'data'
+    elif isinstance(payload, dict):
+        # Check for krisp_blob first, then other common keys
         text_content = (
+            payload.get('krisp_blob') or
             payload.get('text') or 
             payload.get('content') or 
             payload.get('body') or 
@@ -106,25 +118,39 @@ def parse_tasks_from_payload(payload):
         print(f"Payload is dict, extracted text_content length: {len(str(text_content))}")
     else:
         text_content = str(payload)
-        print(f"Payload is not dict, text_content length: {len(text_content)}")
+        print(f"Payload is not dict/list, text_content length: {len(text_content)}")
     
-    # Pattern to match "Task: ... Owner: ..." entries
-    # This handles multi-line tasks and various formats
-    # Matches "Task: ..." followed by "Owner: ..." with optional whitespace/newlines
-    pattern = r'Task:\s*(.+?)\s+Owner:\s*(\w+)'
+    # First, try to parse markdown task list format: "- [ ] Owner to task description"
+    # Pattern matches: "- [ ]" followed by owner name, "to", and task description
+    # Stops at next task item or end of string
+    markdown_pattern = r'-\s*\[\s*\]\s+(\w+)\s+to\s+(.+?)(?=\n\s*-\s*\[|$)'
+    markdown_matches = re.finditer(markdown_pattern, text_content, re.MULTILINE | re.DOTALL | re.IGNORECASE)
     
-    matches = re.finditer(pattern, text_content, re.DOTALL | re.IGNORECASE)
     match_count = 0
-    
-    for match in matches:
+    for match in markdown_matches:
         match_count += 1
-        task_text = match.group(1).strip()
-        owner = match.group(2).strip()
-        print(f"Found task {match_count}: owner={owner}, task_length={len(task_text)}")
+        owner = match.group(1).strip()
+        task_text = match.group(2).strip().replace('\n', ' ').strip()  # Remove newlines and extra spaces
+        print(f"Found markdown task {match_count}: owner={owner}, task_length={len(task_text)}")
         tasks.append({
             'task': task_text,
             'owner': owner
         })
+    
+    # If no markdown tasks found, try the "Task: ... Owner: ..." format
+    if match_count == 0:
+        pattern = r'Task:\s*(.+?)\s+Owner:\s*(\w+)'
+        matches = re.finditer(pattern, text_content, re.DOTALL | re.IGNORECASE)
+        
+        for match in matches:
+            match_count += 1
+            task_text = match.group(1).strip()
+            owner = match.group(2).strip()
+            print(f"Found task {match_count}: owner={owner}, task_length={len(task_text)}")
+            tasks.append({
+                'task': task_text,
+                'owner': owner
+            })
     
     if match_count == 0:
         print(f"No tasks matched pattern. First 500 chars of text_content: {text_content[:500]}")
