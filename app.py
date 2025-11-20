@@ -3,6 +3,7 @@ import os
 import re
 import requests
 from datetime import datetime
+from dateutil import parser as date_parser
 from flask import Flask, request, jsonify
 from psycopg import connect
 from psycopg.rows import dict_row
@@ -100,6 +101,42 @@ def init_db():
 
 # Initialize database on startup
 init_db()
+
+
+def format_date_to_iso8601(date_value):
+    """
+    Convert a date value to ISO 8601 format string (e.g., "2020-12-08T12:00:00Z").
+    Handles various input formats including strings, datetime objects, and timestamps.
+    Returns None if date_value is None or cannot be parsed.
+    """
+    if date_value is None:
+        return None
+    
+    # If it's already a datetime object
+    if isinstance(date_value, datetime):
+        return date_value.strftime('%Y-%m-%dT%H:%M:%SZ')
+    
+    # If it's a string, try to parse it
+    if isinstance(date_value, str):
+        try:
+            # Try parsing with dateutil parser (handles many formats)
+            parsed_date = date_parser.parse(date_value)
+            return parsed_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+        except (ValueError, TypeError):
+            # If parsing fails, return None
+            print(f"Warning: Could not parse date value: {date_value}")
+            return None
+    
+    # If it's a number (timestamp), try to convert
+    if isinstance(date_value, (int, float)):
+        try:
+            parsed_date = datetime.fromtimestamp(date_value)
+            return parsed_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+        except (ValueError, OSError):
+            print(f"Warning: Could not parse timestamp: {date_value}")
+            return None
+    
+    return None
 
 
 def parse_tasks_from_payload(payload):
@@ -408,8 +445,14 @@ def webhook():
             print(f"Extracted meeting_name: {meeting_name}")
         else:
             print("WARNING: meeting_name not found in payload")
+        # Transform meeting_date to ISO 8601 format
         if meeting_date:
-            print(f"Extracted meeting_date: {meeting_date}")
+            formatted_date = format_date_to_iso8601(meeting_date)
+            if formatted_date:
+                meeting_date = formatted_date
+                print(f"Extracted and formatted meeting_date: {meeting_date}")
+            else:
+                print(f"Warning: Could not format meeting_date: {meeting_date}")
         else:
             print("WARNING: meeting_date not found in payload")
         
