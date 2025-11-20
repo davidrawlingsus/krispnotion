@@ -2,46 +2,97 @@ import json
 import os
 from datetime import datetime
 from flask import Flask, request, jsonify
-from glob import glob
+from psycopg import connect
+from psycopg.rows import dict_row
 
 app = Flask(__name__)
 
-# Directory to store JSON files
-OUTPUT_DIR = "data"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Database connection function
+def get_db_connection():
+    """Get database connection using DATABASE_PUBLIC_URL (external) or DATABASE_URL (internal)"""
+    # Prefer DATABASE_PUBLIC_URL for Railway external connections
+    db_url = os.environ.get("DATABASE_PUBLIC_URL") or os.environ.get("DATABASE_URL")
+    
+    if not db_url:
+        raise Exception("No database URL found in environment variables")
+    
+    return connect(db_url)
+
+
+def init_db():
+    """Initialize database table if it doesn't exist"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Create table if it doesn't exist
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS payloads (
+                        id SERIAL PRIMARY KEY,
+                        received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        payload_data JSONB NOT NULL
+                    )
+                """)
+                
+                # Create index on received_at for faster queries
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_payloads_received_at 
+                    ON payloads(received_at DESC)
+                """)
+                
+                conn.commit()
+        print("Database initialized successfully")
+    except Exception as e:
+        print(f"Error initializing database: {str(e)}")
+        # Don't fail startup - connection might be temporary
+        pass
+
+
+# Initialize database on startup
+init_db()
 
 
 @app.route("/", methods=["GET"])
 def health_check():
     """Health check endpoint"""
-    return jsonify({"status": "ok", "message": "Webhook receiver is running"}), 200
+    try:
+        # Test database connection
+        with get_db_connection() as conn:
+            pass
+        return jsonify({
+            "status": "ok",
+            "message": "Webhook receiver is running",
+            "database": "connected"
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "ok",
+            "message": "Webhook receiver is running",
+            "database": f"error: {str(e)}"
+        }), 200
 
 
 @app.route("/latest", methods=["GET"])
 def get_latest():
     """Get the most recent payload received"""
     try:
-        # Find all payload files
-        pattern = os.path.join(OUTPUT_DIR, "payload_*.json")
-        files = glob(pattern)
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("""
+                    SELECT id, received_at, payload_data
+                    FROM payloads
+                    ORDER BY received_at DESC
+                    LIMIT 1
+                """)
+                
+                result = cursor.fetchone()
         
-        if not files:
+        if not result:
             return jsonify({"error": "No payloads found"}), 404
         
-        # Get the most recent file
-        latest_file = max(files, key=os.path.getmtime)
-        
-        # Read and return the payload
-        with open(latest_file, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        
-        filename = os.path.basename(latest_file)
-        modified_time = datetime.fromtimestamp(os.path.getmtime(latest_file))
-        
         return jsonify({
-            "filename": filename,
-            "received_at": modified_time.isoformat(),
-            "payload": payload
+            "id": result["id"],
+            "received_at": result["received_at"].isoformat(),
+            "payload": result["payload_data"]
         }), 200
         
     except Exception as e:
@@ -53,24 +104,23 @@ def get_latest():
 def list_payloads():
     """List all received payloads"""
     try:
-        # Find all payload files
-        pattern = os.path.join(OUTPUT_DIR, "payload_*.json")
-        files = glob(pattern)
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("""
+                    SELECT id, received_at
+                    FROM payloads
+                    ORDER BY received_at DESC
+                """)
+                
+                results = cursor.fetchall()
         
-        if not files:
-            return jsonify({"count": 0, "payloads": []}), 200
-        
-        # Sort by modification time (newest first)
-        files_sorted = sorted(files, key=os.path.getmtime, reverse=True)
-        
-        payloads = []
-        for filepath in files_sorted:
-            filename = os.path.basename(filepath)
-            modified_time = datetime.fromtimestamp(os.path.getmtime(filepath))
-            payloads.append({
-                "filename": filename,
-                "received_at": modified_time.isoformat()
-            })
+        payloads = [
+            {
+                "id": row["id"],
+                "received_at": row["received_at"].isoformat()
+            }
+            for row in results
+        ]
         
         return jsonify({
             "count": len(payloads),
@@ -79,6 +129,34 @@ def list_payloads():
         
     except Exception as e:
         print(f"Error listing payloads: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/payload/<int:payload_id>", methods=["GET"])
+def get_payload(payload_id):
+    """Get a specific payload by ID"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("""
+                    SELECT id, received_at, payload_data
+                    FROM payloads
+                    WHERE id = %s
+                """, (payload_id,))
+                
+                result = cursor.fetchone()
+        
+        if not result:
+            return jsonify({"error": "Payload not found"}), 404
+        
+        return jsonify({
+            "id": result["id"],
+            "received_at": result["received_at"].isoformat(),
+            "payload": result["payload_data"]
+        }), 200
+        
+    except Exception as e:
+        print(f"Error retrieving payload: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -92,21 +170,27 @@ def webhook():
         if not payload:
             return jsonify({"error": "No payload received"}), 400
         
-        # Generate filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # milliseconds precision
-        filename = f"payload_{timestamp}.json"
-        filepath = os.path.join(OUTPUT_DIR, filename)
+        # Save to database
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO payloads (payload_data)
+                    VALUES (%s)
+                    RETURNING id, received_at
+                """, (json.dumps(payload),))
+                
+                result = cursor.fetchone()
+                conn.commit()
         
-        # Write payload to JSON file
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
+        payload_id, received_at = result
         
-        print(f"Received payload and saved to {filepath}")
+        print(f"Received payload and saved to database with ID {payload_id}")
         
         return jsonify({
             "status": "success",
             "message": "Payload received and saved",
-            "filename": filename
+            "id": payload_id,
+            "received_at": received_at.isoformat()
         }), 200
         
     except Exception as e:
@@ -117,4 +201,3 @@ def webhook():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
