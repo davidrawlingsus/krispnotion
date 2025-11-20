@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify
 from psycopg import connect
 from psycopg.rows import dict_row
 
+# Webhook receiver for Krisp to Notion integration
 app = Flask(__name__)
 
 # Database connection function
