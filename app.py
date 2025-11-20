@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime
 from flask import Flask, request, jsonify
+from glob import glob
 
 app = Flask(__name__)
 
@@ -14,6 +15,71 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 def health_check():
     """Health check endpoint"""
     return jsonify({"status": "ok", "message": "Webhook receiver is running"}), 200
+
+
+@app.route("/latest", methods=["GET"])
+def get_latest():
+    """Get the most recent payload received"""
+    try:
+        # Find all payload files
+        pattern = os.path.join(OUTPUT_DIR, "payload_*.json")
+        files = glob(pattern)
+        
+        if not files:
+            return jsonify({"error": "No payloads found"}), 404
+        
+        # Get the most recent file
+        latest_file = max(files, key=os.path.getmtime)
+        
+        # Read and return the payload
+        with open(latest_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        
+        filename = os.path.basename(latest_file)
+        modified_time = datetime.fromtimestamp(os.path.getmtime(latest_file))
+        
+        return jsonify({
+            "filename": filename,
+            "received_at": modified_time.isoformat(),
+            "payload": payload
+        }), 200
+        
+    except Exception as e:
+        print(f"Error retrieving latest payload: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/payloads", methods=["GET"])
+def list_payloads():
+    """List all received payloads"""
+    try:
+        # Find all payload files
+        pattern = os.path.join(OUTPUT_DIR, "payload_*.json")
+        files = glob(pattern)
+        
+        if not files:
+            return jsonify({"count": 0, "payloads": []}), 200
+        
+        # Sort by modification time (newest first)
+        files_sorted = sorted(files, key=os.path.getmtime, reverse=True)
+        
+        payloads = []
+        for filepath in files_sorted:
+            filename = os.path.basename(filepath)
+            modified_time = datetime.fromtimestamp(os.path.getmtime(filepath))
+            payloads.append({
+                "filename": filename,
+                "received_at": modified_time.isoformat()
+            })
+        
+        return jsonify({
+            "count": len(payloads),
+            "payloads": payloads
+        }), 200
+        
+    except Exception as e:
+        print(f"Error listing payloads: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/webhook", methods=["POST"])
